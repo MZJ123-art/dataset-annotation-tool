@@ -155,6 +155,16 @@ class PageManage(QWidget):
         rename_dir_row.addWidget(btn_rename)
         rename_layout.addLayout(rename_dir_row)
 
+        rename_label_row = QHBoxLayout()
+        rename_label_row.addWidget(QLabel("标签目录:"))
+        self.rename_label_dir = QLineEdit()
+        self.rename_label_dir.setPlaceholderText("留空则自动查找同级 labels/ 目录")
+        btn_rename_label = QPushButton("浏览")
+        btn_rename_label.clicked.connect(lambda: self._browse_dir(self.rename_label_dir))
+        rename_label_row.addWidget(self.rename_label_dir)
+        rename_label_row.addWidget(btn_rename_label)
+        rename_layout.addLayout(rename_label_row)
+
         prefix_row = QHBoxLayout()
         prefix_row.addWidget(QLabel("前缀:"))
         self.edit_prefix = QLineEdit("img")
@@ -233,14 +243,13 @@ class PageManage(QWidget):
 
     def _on_validate_done(self, issues):
         self.btn_validate.setEnabled(True)
+        self.log.clear()
         if not issues:
             self.log.append("校验通过！未发现问题。")
         else:
             self.log.append(f"发现 {len(issues)} 个问题:")
-            for issue in issues[:100]:
+            for issue in issues:
                 self.log.append(str(issue))
-            if len(issues) > 100:
-                self.log.append(f"... 还有 {len(issues)-100} 个问题")
 
     def _start_rename(self):
         d = self.rename_dir.text().strip()
@@ -250,11 +259,24 @@ class PageManage(QWidget):
         prefix = self.edit_prefix.text().strip() or "img"
         start = self.spin_start.value()
 
+        # resolve label dir
+        label_dir = self.rename_label_dir.text().strip()
+        if not label_dir:
+            # auto-detect: try sibling labels/ directory
+            parent = os.path.dirname(d)
+            candidate = os.path.join(parent, "labels")
+            if os.path.isdir(candidate):
+                label_dir = candidate
+            elif os.path.isdir(os.path.join(d, "labels")):
+                label_dir = os.path.join(d, "labels")
+
         self.btn_rename.setEnabled(False)
         self.log.clear()
         try:
-            result = batch_rename(d, prefix=prefix, start_index=start)
+            result = batch_rename(d, label_dir=label_dir or None, prefix=prefix, start_index=start)
             self.log.append(f"重命名完成，共 {len(result)} 个文件")
+            if label_dir:
+                self.log.append(f"标签目录: {label_dir}")
             for old, new in result[:20]:
                 self.log.append(f"  {old} → {new}")
             if len(result) > 20:
@@ -269,6 +291,7 @@ class PageManage(QWidget):
         self.log.append(msg)
 
     def _on_error(self, err):
+        self.log.clear()
         self.log.append(f"错误: {err}")
         self.btn_split.setEnabled(True)
         self.btn_validate.setEnabled(True)

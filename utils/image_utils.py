@@ -10,7 +10,9 @@ def get_image_size(image_path: str) -> Tuple[int, int]:
 
 
 def read_image_cv2(image_path: str) -> np.ndarray:
-    img = cv2.imread(image_path)
+    # Use numpy fromfile + cv2.imdecode to handle non-ASCII paths
+    buf = np.fromfile(image_path, dtype=np.uint8)
+    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
     if img is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
     return img

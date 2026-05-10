@@ -87,17 +87,32 @@ def write_label(label_path: str, annotation: Annotation, class_mapping: ClassMap
 
 
 def collect_images(directory: str) -> dict:
-    """Collect all images in a directory, return {stem: full_path}"""
+    """Collect all images in a directory and subdirectories, return {stem: full_path}"""
     result = {}
     p = Path(directory)
     if not p.is_dir():
         return result
     for ext in IMAGE_EXTS:
-        for f in p.glob(f"*{ext}"):
+        for f in p.rglob(f"*{ext}"):
             result[f.stem] = str(f)
-        for f in p.glob(f"*{ext.upper()}"):
+        for f in p.rglob(f"*{ext.upper()}"):
             result[f.stem] = str(f)
     return result
+
+
+def _collect_label_files(lbl_dir: Path, max_depth: int = 3) -> list:
+    """Collect label txt files from directory and subdirectories (up to max_depth levels)."""
+    exclude = {"classes.txt", "classes.names"}
+    files = []
+    for f in sorted(lbl_dir.glob("*.txt")):
+        if f.name not in exclude:
+            files.append(f)
+    if files or max_depth <= 0:
+        return files
+    for subdir in sorted(lbl_dir.iterdir()):
+        if subdir.is_dir():
+            files.extend(_collect_label_files(subdir, max_depth - 1))
+    return files
 
 
 def read_dataset(dataset_dir: str, image_dir: str = None, label_dir: str = None) -> Tuple[List[Annotation], ClassMapping]:
@@ -134,10 +149,8 @@ def read_dataset(dataset_dir: str, image_dir: str = None, label_dir: str = None)
 
     # match labels to images
     annotations = []
-    label_files = sorted(lbl_dir.glob("*.txt"))
+    label_files = _collect_label_files(lbl_dir)
     for lf in label_files:
-        if lf.name in ("classes.txt", "classes.names"):
-            continue
         img_path = img_stem_map.get(lf.stem)
         if not img_path:
             img_path = find_image_for_label(str(lf))

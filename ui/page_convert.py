@@ -142,10 +142,14 @@ class PageConvert(QWidget):
             self.lbl_detected.setText("检测格式: 未识别")
             return
 
-        # diagnostic
+        # diagnostic (search top-level and subdirectories)
         p = Path(path)
-        txt_count = len([f for f in p.glob("*.txt") if f.name not in ("classes.txt", "classes.names")])
-        xml_count = len(list(p.glob("*.xml")))
+        txt_files = [f for f in p.glob("*.txt") if f.name not in ("classes.txt", "classes.names")]
+        txt_files += [f for sub in p.iterdir() if sub.is_dir() for f in sub.glob("*.txt") if f.name not in ("classes.txt", "classes.names")]
+        txt_count = len(txt_files)
+        xml_files = list(p.glob("*.xml"))
+        xml_files += [f for sub in p.iterdir() if sub.is_dir() for f in sub.glob("*.xml")]
+        xml_count = len(xml_files)
         json_count = len(list(p.glob("*.json")))
         count = max(txt_count, xml_count, json_count)
 

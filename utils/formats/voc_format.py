@@ -44,8 +44,11 @@ def read_annotation(xml_path: str) -> Tuple[Optional[Annotation], ClassMapping]:
                 break
     if not img_path:
         img_path = find_image_for_xml(xml_path)
+    # if image not found, use XML filename stem as placeholder
+    # (VOC XML already has image dimensions in <size>, so conversion can proceed)
     if not img_path:
-        return None, ClassMapping()
+        stem = Path(xml_path).stem
+        img_path = str(Path(xml_path).parent / f"{stem}.jpg")
 
     class_mapping = ClassMapping()
     objects = []
@@ -108,16 +111,42 @@ def write_annotation(xml_path: str, annotation: Annotation, class_mapping: Class
         f.write(xml_str)
 
 
-def read_dataset(dataset_dir: str) -> Tuple[List[Annotation], ClassMapping]:
-    dataset_path = Path(dataset_dir)
-    ann_dir = dataset_path / "Annotations" if (dataset_path / "Annotations").is_dir() else dataset_path
+def _collect_xml_files(label_dir: Path, max_depth: int = 3) -> List[Path]:
+    """Collect XML files from label_dir, including subdirectories (up to max_depth levels)."""
+    xml_files = []
+    # check for Annotations/ subdirectory first
+    ann_dir = label_dir / "Annotations"
+    if ann_dir.is_dir():
+        xml_files.extend(sorted(ann_dir.glob("*.xml")))
+    # search top-level
+    xml_files.extend(sorted(label_dir.glob("*.xml")))
+    if xml_files or max_depth <= 0:
+        return xml_files
+    # search subdirectories
+    for subdir in sorted(label_dir.iterdir()):
+        if subdir.is_dir() and subdir.name != "Annotations":
+            sub_ann = subdir / "Annotations"
+            if sub_ann.is_dir():
+                xml_files.extend(sorted(sub_ann.glob("*.xml")))
+            else:
+                xml_files.extend(sorted(subdir.glob("*.xml")))
+    if not xml_files and max_depth > 1:
+        for subdir in sorted(label_dir.iterdir()):
+            if subdir.is_dir() and subdir.name != "Annotations":
+                xml_files.extend(_collect_xml_files(subdir, max_depth - 1))
+    return xml_files
+
+
+def read_dataset(dataset_dir: str, image_dir: str = None, label_dir: str = None) -> Tuple[List[Annotation], ClassMapping]:
+    lbl_path = Path(label_dir) if label_dir else Path(dataset_dir)
+    xml_files = _collect_xml_files(lbl_path)
 
     all_annotations = []
     class_mapping = ClassMapping()
     name_to_id: dict[str, int] = {}
     cid = 0
 
-    for xml_file in sorted(ann_dir.glob("*.xml")):
+    for xml_file in xml_files:
         ann, _ = read_annotation(str(xml_file))
         if ann is None:
             continue

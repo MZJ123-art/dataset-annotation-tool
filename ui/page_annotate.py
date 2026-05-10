@@ -19,13 +19,13 @@ class PageAnnotate(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._base_dir = ""
-        self._label_root = ""  # 标签主目录 (e.g. E:\labels)
         self._image_dir = ""
         self._label_dir = ""
         self._image_files = []
         self._current_idx = -1
         self._class_names = []
         self._class_mapping = ClassMapping()
+        self._splits = []  # detected splits: [(name, img_dir, lbl_dir), ...]
         self._init_ui()
 
     def _init_ui(self):
@@ -33,16 +33,9 @@ class PageAnnotate(QWidget):
 
         # toolbar
         toolbar = QHBoxLayout()
-        self.btn_open_dir = QPushButton("打开图片目录")
+        self.btn_open_dir = QPushButton("打开数据集目录")
         self.btn_open_dir.clicked.connect(self._open_image_dir)
-        self.btn_open_label_root = QPushButton("设置标签主目录")
-        self.btn_open_label_root.clicked.connect(self._set_label_root)
-        self.btn_open_label = QPushButton("打开标签目录")
-        self.btn_open_label.clicked.connect(self._open_label_dir)
-
         toolbar.addWidget(self.btn_open_dir)
-        toolbar.addWidget(self.btn_open_label_root)
-        toolbar.addWidget(self.btn_open_label)
         toolbar.addStretch()
 
         self.lbl_current = QLabel("当前: -")
@@ -122,6 +115,7 @@ class PageAnnotate(QWidget):
         self.viewer.box_selected.connect(self._on_box_selected)
         self.viewer.box_deleted.connect(self._on_box_deleted)
         self.viewer.box_moved.connect(self._on_box_moved)
+        self.viewer.image_dropped.connect(self._on_image_dropped)
         splitter.addWidget(self.viewer)
 
         # right: label list
@@ -166,11 +160,96 @@ class PageAnnotate(QWidget):
         else:
             super().keyPressEvent(event)
 
+    def _detect_dataset_structure(self, root_dir):
+        """Detect dataset directory structure.
+
+        Returns list of (split_name, images_dir, labels_dir) tuples.
+        If no splits found, returns empty list.
+        """
+        IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+        def _has_images(d):
+            if not os.path.isdir(d):
+                return False
+            for f in os.listdir(d):
+                if os.path.splitext(f)[1].lower() in IMAGE_EXTS:
+                    return True
+            return False
+
+        def _find_labels_for_images(img_dir):
+            """Find corresponding labels dir for an images dir."""
+            parent = os.path.dirname(img_dir)
+            basename = os.path.basename(img_dir)
+            # sibling labels/ with same basename
+            for candidate in [
+                os.path.join(parent, "labels", basename),
+                os.path.join(parent, "labels"),
+                os.path.join(img_dir, "labels"),
+            ]:
+                if os.path.isdir(candidate):
+                    return candidate
+            return ""
+
+        splits = []
+
+        # Structure A: root/images/{split}/ + root/labels/{split}/
+        images_dir = os.path.join(root_dir, "images")
+        labels_dir = os.path.join(root_dir, "labels")
+        if os.path.isdir(images_dir):
+            subdirs = sorted([d for d in os.listdir(images_dir)
+                              if os.path.isdir(os.path.join(images_dir, d))])
+            if subdirs:
+                for sd in subdirs:
+                    img_sd = os.path.join(images_dir, sd)
+                    lbl_sd = os.path.join(labels_dir, sd) if os.path.isdir(labels_dir) else ""
+                    if not lbl_sd or not os.path.isdir(lbl_sd):
+                        lbl_sd = _find_labels_for_images(img_sd)
+                    splits.append((sd, img_sd, lbl_sd))
+            elif _has_images(images_dir):
+                lbl = _find_labels_for_images(images_dir)
+                splits.append(("", images_dir, lbl))
+
+        # Structure B: root/{split}/images/ + root/{split}/labels/
+        if not splits:
+            subdirs = sorted([d for d in os.listdir(root_dir)
+                              if os.path.isdir(os.path.join(root_dir, d))
+                              and d not in ("images", "labels", "Annotations")])
+            found_splits = []
+            for sd in subdirs:
+                sd_path = os.path.join(root_dir, sd)
+                img_sd = os.path.join(sd_path, "images")
+                lbl_sd = os.path.join(sd_path, "labels")
+                if os.path.isdir(img_sd) and _has_images(img_sd):
+                    if not os.path.isdir(lbl_sd):
+                        lbl_sd = _find_labels_for_images(img_sd)
+                    found_splits.append((sd, img_sd, lbl_sd))
+                elif _has_images(sd_path):
+                    lbl = _find_labels_for_images(sd_path)
+                    found_splits.append((sd, sd_path, lbl))
+            if found_splits:
+                splits = found_splits
+
+        return splits
+
     def _open_image_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "选择图片目录")
+        d = QFileDialog.getExistingDirectory(self, "选择数据集目录")
         if not d:
             return
         self._base_dir = d
+        self._reset_state()
+        self.lbl_path.setText(d)
+
+        # Try to detect dataset structure
+        self._splits = self._detect_dataset_structure(d)
+
+        if self._splits:
+            # Show splits as clickable entries in file list
+            self._show_split_list()
+        else:
+            # No splits detected, try loading images directly (up to 3 levels)
+            self._load_images_from_dir(d)
+
+    def _reset_state(self):
         self._image_dir = ""
         self._label_dir = ""
         self._image_files = []
@@ -179,86 +258,55 @@ class PageAnnotate(QWidget):
         self.viewer.set_boxes([])
         self.label_list.set_items([])
         self.btn_back.setEnabled(False)
-        self.lbl_path.setText(d)
 
-        # find subdirectories and images
-        subdirs = []
-        for item in sorted(os.listdir(d)):
-            full = os.path.join(d, item)
-            if os.path.isdir(full):
-                subdirs.append(item)
-            elif os.path.splitext(item)[1].lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}:
-                self._image_files.append(full)
+    def _show_split_list(self):
+        """Show detected splits as clickable entries in the file list."""
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+        for name, img_dir, lbl_dir in self._splits:
+            img_count = len(get_image_files(img_dir))
+            lbl_info = "✓" if lbl_dir and os.path.isdir(lbl_dir) else "✗"
+            self.file_list.addItem(f"[split] {name}  ({img_count}张 标签{lbl_info})")
+        self.file_list.blockSignals(False)
+        self.lbl_status.setText(f"检测到 {len(self._splits)} 个数据集分区，点击进入")
 
-        # if has images directly, show them
+    def _load_images_from_dir(self, directory):
+        """Load images from directory using deep search."""
+        self._image_files = get_image_files(directory)
         if self._image_files:
+            self._image_dir = directory
+            self._auto_find_labels(directory)
+            self.file_list.blockSignals(True)
             for f in self._image_files:
                 self.file_list.addItem(os.path.basename(f))
-            self._image_dir = d
-            self._auto_find_labels(d)
-            self.lbl_status.setText(f"已加载 {len(self._image_files)} 张图片")
-            if self._image_files:
-                self.file_list.setCurrentRow(0)
-        # if has subdirs, show them as folders
-        elif subdirs:
-            for sd in subdirs:
-                self.file_list.addItem(f"[目录] {sd}")
-            self.lbl_status.setText(f"包含 {len(subdirs)} 个子目录，点击子目录加载内容")
+            self.file_list.blockSignals(False)
+            lbl_info = self._label_dir if self._label_dir else os.path.join(self._image_dir, "labels") + " (自动创建)"
+            self.lbl_status.setText(f"已加载 {len(self._image_files)} 张图片 | 标签目录: {lbl_info}")
+            self.file_list.setCurrentRow(0)
         else:
-            self.lbl_status.setText("未找到图片或子目录")
-
-    def _set_label_root(self):
-        d = QFileDialog.getExistingDirectory(self, "选择标签主目录")
-        if not d:
-            return
-        self._label_root = d
-        self.lbl_status.setText(f"标签主目录: {d}")
-        # reload labels if currently viewing images
-        if self._current_idx >= 0 and self._image_dir:
-            self._auto_find_labels(self._image_dir)
-            self._load_labels_for_current()
+            self.lbl_status.setText("未找到图片")
 
     def _go_back(self):
         if not self._base_dir:
             return
         if self._current_idx >= 0:
             self._save_labels()
-        self._image_dir = ""
-        self._label_dir = ""
-        self._image_files = []
-        self._current_idx = -1
-        self.file_list.clear()
-        self.viewer.set_boxes([])
-        self.label_list.set_items([])
-        self.btn_back.setEnabled(False)
+        self._reset_state()
         self.lbl_path.setText(self._base_dir)
 
-        subdirs = []
-        for item in sorted(os.listdir(self._base_dir)):
-            full = os.path.join(self._base_dir, item)
-            if os.path.isdir(full):
-                subdirs.append(item)
-            elif os.path.splitext(item)[1].lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}:
-                self._image_files.append(full)
-
-        if self._image_files:
-            for f in self._image_files:
-                self.file_list.addItem(os.path.basename(f))
-            self._image_dir = self._base_dir
-            self._auto_find_labels(self._base_dir)
-            self.lbl_status.setText(f"已加载 {len(self._image_files)} 张图片")
-            if self._image_files:
-                self.file_list.setCurrentRow(0)
-        elif subdirs:
-            for sd in subdirs:
-                self.file_list.addItem(f"[目录] {sd}")
-            self.lbl_status.setText(f"包含 {len(subdirs)} 个子目录，点击子目录加载内容")
+        if self._splits:
+            self._show_split_list()
+        else:
+            self._load_images_from_dir(self._base_dir)
 
     def _auto_find_labels(self, img_dir):
-        """Auto find labels dir and load classes."""
+        """Auto find labels dir and load classes.
+
+        Searches for a separate labels directory. If not found,
+        leaves _label_dir empty so _save_labels will create img_dir/labels/.
+        """
         self._label_dir = ""
         parent = os.path.dirname(img_dir)
-        basename = os.path.basename(img_dir)
 
         # 1. try sibling labels/ dir
         for candidate in [os.path.join(parent, "labels"), os.path.join(img_dir, "labels")]:
@@ -266,60 +314,45 @@ class PageAnnotate(QWidget):
                 self._label_dir = candidate
                 break
 
-        # 2. try label_root with matching subdir name
-        if not self._label_dir and self._label_root:
-            candidate = os.path.join(self._label_root, basename)
-            if os.path.isdir(candidate):
-                self._label_dir = candidate
+        # 2. if no separate labels dir found, leave _label_dir empty
+        #    _save_labels will auto-create img_dir/labels/ for new annotations
 
-        # 3. try label_root directly
-        if not self._label_dir and self._label_root and os.path.isdir(self._label_root):
-            self._label_dir = self._label_root
-
-        # 4. fallback to image dir
-        if not self._label_dir:
-            self._label_dir = img_dir
-
-        # load classes
+        # load classes: check labels dir first, then image dir (for mixed folders)
         loaded = False
+        search_dir = self._label_dir if self._label_dir else img_dir
         for name in ["classes.txt", "classes.names"]:
-            p = os.path.join(self._label_dir, name)
+            p = os.path.join(search_dir, name)
             if os.path.exists(p):
                 self._load_classes(p)
                 loaded = True
                 break
         if not loaded:
-            self._load_classes_from_labels(self._label_dir)
+            self._load_classes_from_labels(search_dir)
 
-    def _open_label_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "选择标签目录")
-        if not d:
-            return
-        self._label_dir = d
-        # if the selected dir contains subdirs, treat it as label root
-        has_subdirs = any(os.path.isdir(os.path.join(d, x)) for x in os.listdir(d))
-        if has_subdirs:
-            self._label_root = d
-        loaded = False
-        for name in ["classes.txt", "classes.names"]:
-            p = os.path.join(d, name)
-            if os.path.exists(p):
-                self._load_classes(p)
-                loaded = True
-                break
-        if not loaded:
-            self._load_classes_from_labels(d)
-        if self._current_idx >= 0:
-            self._load_labels_for_current()
+    def _collect_txt_files(self, directory, max_depth=3):
+        """Collect .txt label files up to max_depth levels deep."""
+        exclude = {"classes.txt", "classes.names"}
+        result = []
+        for f in sorted(os.listdir(directory)):
+            full = os.path.join(directory, f)
+            if os.path.isfile(full) and f.endswith(".txt") and f not in exclude:
+                result.append(full)
+        if result or max_depth <= 0:
+            return result
+        for f in sorted(os.listdir(directory)):
+            full = os.path.join(directory, f)
+            if os.path.isdir(full):
+                result.extend(self._collect_txt_files(full, max_depth - 1))
+        return result
 
     def _load_classes_from_labels(self, label_dir):
         self._class_names = []
         self._class_mapping = ClassMapping()
         self.combo_class.clear()
         class_ids = set()
-        label_files = [f for f in os.listdir(label_dir) if f.endswith(".txt") and f not in ("classes.txt", "classes.names")]
-        for fname in label_files[:200]:  # scan up to 200 files
-            fpath = os.path.join(label_dir, fname)
+        # collect label files up to 3 levels deep
+        label_files = self._collect_txt_files(label_dir, max_depth=3)
+        for fpath in label_files[:200]:  # scan up to 200 files
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     for line in f:
@@ -370,11 +403,10 @@ class PageAnnotate(QWidget):
         if idx < 0:
             return
         item_text = self.file_list.item(idx).text()
-        # handle subdirectory click
-        if item_text.startswith("[目录] "):
-            dirname = item_text[5:]  # remove "[目录] " prefix (5 chars)
-            subdir = os.path.join(self._base_dir, dirname)
-            self._load_subdir(subdir)
+        # handle split click
+        if item_text.startswith("[split] "):
+            if self._splits and idx < len(self._splits):
+                self._load_split(idx)
             return
         # handle image file click
         if idx >= len(self._image_files):
@@ -387,18 +419,35 @@ class PageAnnotate(QWidget):
         self._load_labels_for_current()
         self.lbl_current.setText(f"当前: {os.path.basename(img_path)} ({idx+1}/{len(self._image_files)})")
 
-    def _load_subdir(self, subdir):
+    def _load_split(self, split_idx):
+        """Load images and labels for a specific split."""
         if self._current_idx >= 0:
             self._save_labels()
-        self._image_dir = subdir
-        self._image_files = get_image_files(subdir)
-        self._auto_find_labels(subdir)
+        name, img_dir, lbl_dir = self._splits[split_idx]
+        self._image_dir = img_dir
+        self._label_dir = lbl_dir if lbl_dir and os.path.isdir(lbl_dir) else img_dir
+        self._image_files = get_image_files(img_dir)
+
+        # load classes
+        loaded = False
+        for cname in ["classes.txt", "classes.names"]:
+            p = os.path.join(self._label_dir, cname)
+            if os.path.exists(p):
+                self._load_classes(p)
+                loaded = True
+                break
+        if not loaded:
+            self._load_classes_from_labels(self._label_dir)
+
+        self.file_list.blockSignals(True)
         self.file_list.clear()
         for f in self._image_files:
             self.file_list.addItem(os.path.basename(f))
+        self.file_list.blockSignals(False)
         self.btn_back.setEnabled(True)
-        self.lbl_path.setText(subdir)
-        self.lbl_status.setText(f"已加载 {len(self._image_files)} 张图片 | 标签目录: {self._label_dir}")
+        self.lbl_path.setText(f"{self._base_dir}  ›  {name}" if name else self._base_dir)
+        lbl_info = self._label_dir if self._label_dir else os.path.join(self._image_dir, "labels") + " (自动创建)"
+        self.lbl_status.setText(f"已加载 {len(self._image_files)} 张图片 | 标签目录: {lbl_info}")
         self._current_idx = -1
         if self._image_files:
             self.file_list.setCurrentRow(0)
@@ -407,7 +456,7 @@ class PageAnnotate(QWidget):
         if self._current_idx < 0:
             return
         img_path = self._image_files[self._current_idx]
-        label_path = find_label_for_image(img_path, self._label_dir)
+        label_path = find_label_for_image(img_path, self._label_dir or None)
         if not label_path:
             self.viewer.set_boxes([])
             self.label_list.set_items([])
@@ -482,6 +531,35 @@ class PageAnnotate(QWidget):
     def _on_box_moved(self, idx, x1, y1, x2, y2):
         self._save_labels()
         self._update_label_list()
+
+    def _on_image_dropped(self, img_path):
+        if self._current_idx >= 0:
+            self._save_labels()
+        img_dir = os.path.dirname(img_path)
+        # If dropped image is from a different directory, load that directory
+        if img_dir != self._image_dir:
+            self._image_dir = img_dir
+            self._image_files = get_image_files(img_dir)
+            self._auto_find_labels(img_dir)
+            self.file_list.blockSignals(True)
+            self.file_list.clear()
+            for f in self._image_files:
+                self.file_list.addItem(os.path.basename(f))
+            self.file_list.blockSignals(False)
+            self.lbl_path.setText(img_dir)
+            lbl_info = self._label_dir if self._label_dir else os.path.join(self._image_dir, "labels") + " (自动创建)"
+            self.lbl_status.setText(f"已加载 {len(self._image_files)} 张图片 | 标签目录: {lbl_info}")
+        # Select the dropped image in the list
+        norm_path = os.path.normpath(img_path)
+        for i, f in enumerate(self._image_files):
+            if os.path.normpath(f) == norm_path:
+                self.file_list.setCurrentRow(i)
+                return
+        # If not found in list (shouldn't happen), load directly
+        self._current_idx = -1
+        self.viewer.set_image(img_path)
+        self.viewer.clear_boxes()
+        self.lbl_current.setText(f"当前: {os.path.basename(img_path)}")
 
     def _on_label_selected(self, idx):
         self.viewer.select_box(idx)

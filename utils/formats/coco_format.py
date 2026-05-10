@@ -109,15 +109,14 @@ def write_annotation(json_path: str, annotations: List[Annotation], class_mappin
         json.dump(coco_data, f, ensure_ascii=False, indent=2)
 
 
-def find_coco_json(dataset_dir: str) -> Optional[str]:
-    p = Path(dataset_dir)
+def _find_coco_in_dir(directory: Path) -> Optional[str]:
+    """Search for COCO JSON in a single directory."""
     for name in ["annotations.json", "_annotations.coco.json", "instances.json",
                  "result.json", "annotation.json"]:
-        candidate = p / name
+        candidate = directory / name
         if candidate.exists():
             return str(candidate)
-    # search any json with coco structure
-    for f in p.glob("*.json"):
+    for f in directory.glob("*.json"):
         try:
             with open(f, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -125,4 +124,25 @@ def find_coco_json(dataset_dir: str) -> Optional[str]:
                 return str(f)
         except (json.JSONDecodeError, KeyError):
             continue
+    return None
+
+
+def find_coco_json(dataset_dir: str, max_depth: int = 3) -> Optional[str]:
+    p = Path(dataset_dir)
+    result = _find_coco_in_dir(p)
+    if result:
+        return result
+    if max_depth <= 0:
+        return None
+    for subdir in sorted(p.iterdir()):
+        if subdir.is_dir():
+            result = _find_coco_in_dir(subdir)
+            if result:
+                return result
+    if max_depth > 1:
+        for subdir in sorted(p.iterdir()):
+            if subdir.is_dir():
+                result = find_coco_json(str(subdir), max_depth - 1)
+                if result:
+                    return result
     return None

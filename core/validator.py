@@ -6,6 +6,17 @@ from utils.formats.yolo_format import read_label
 from utils.image_utils import get_image_size
 
 
+def _collect_labels_recursive(directory: Path, result: list, max_depth: int = 3):
+    """Collect .txt label files from directory and subdirectories."""
+    for f in sorted(directory.glob("*.txt")):
+        result.append(f)
+    if max_depth <= 0:
+        return
+    for subdir in sorted(directory.iterdir()):
+        if subdir.is_dir():
+            _collect_labels_recursive(subdir, result, max_depth - 1)
+
+
 class ValidationIssue:
     def __init__(self, file_path: str, issue_type: str, message: str, severity: str = "warning"):
         self.file_path = file_path
@@ -67,8 +78,9 @@ def validate_dataset(
             except Exception as e:
                 issues.append(ValidationIssue(label_path, "parse_error", f"解析失败: {e}", "error"))
 
-    # check for orphan labels
-    label_files = list(Path(label_dir).glob("*.txt"))
+    # check for orphan labels (search up to 3 levels deep)
+    label_files = []
+    _collect_labels_recursive(Path(label_dir), label_files, max_depth=3)
     image_stems = {Path(f).stem for f in images}
     for lf in label_files:
         if lf.name == "classes.txt":

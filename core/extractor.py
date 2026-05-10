@@ -60,15 +60,22 @@ def extract_frames(
         if frame_idx % frame_interval == 0:
             filename = f"{video_stem}_{saved_count:06d}.{output_format}"
             filepath = os.path.join(output_dir, filename)
-            cv2.imwrite(filepath, frame)
-            saved_files.append(filepath)
-            saved_count += 1
+            # Use imencode + tofile to handle non-ASCII paths (Chinese chars)
+            ext = os.path.splitext(filepath)[1]
+            if ext.lower() in ('.jpg', '.jpeg'):
+                ret_enc, buf = cv2.imencode(ext, frame, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            else:
+                ret_enc, buf = cv2.imencode(ext, frame)
+            if ret_enc:
+                buf.tofile(filepath)
+                saved_files.append(filepath)
+                saved_count += 1
 
-            if progress_callback:
-                progress_callback(frame_idx, total_frames, filename)
+                if progress_callback:
+                    progress_callback(frame_idx, total_frames, filename)
 
-            if max_frames and saved_count >= max_frames:
-                break
+                if max_frames and saved_count >= max_frames:
+                    break
 
         frame_idx += 1
 

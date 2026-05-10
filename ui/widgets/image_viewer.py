@@ -52,11 +52,13 @@ class ImageViewer(QWidget):
     box_selected = pyqtSignal(int)
     box_deleted = pyqtSignal()
     box_moved = pyqtSignal(int, float, float, float, float)
+    image_dropped = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAcceptDrops(True)
 
         self._pixmap: Optional[QPixmap] = None
         self._boxes: List[BoundingBox] = []
@@ -81,7 +83,10 @@ class ImageViewer(QWidget):
         return max(self._selected_indices) if self._selected_indices else -1
 
     def set_image(self, image_path: str):
-        cv_img = cv2.imread(image_path)
+        # Use numpy fromfile + cv2.imdecode to handle non-ASCII paths
+        import numpy as np
+        buf = np.fromfile(image_path, dtype=np.uint8)
+        cv_img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if cv_img is None:
             return
         rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
@@ -172,7 +177,7 @@ class ImageViewer(QWidget):
 
         if not self._pixmap:
             painter.setPen(QColor(200, 200, 200))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "拖入图片或选择文件")
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "拖入图片或选择文件开始标注")
             return
 
         target = QRectF(self._offset[0], self._offset[1],
@@ -304,3 +309,18 @@ class ImageViewer(QWidget):
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
             self.delete_selected()
         super().keyPressEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')):
+                self.image_dropped.emit(path)
+                break

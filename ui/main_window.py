@@ -97,7 +97,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addStretch()
 
         # version label
-        ver = QLabel("v1.0")
+        ver = QLabel("v2.0")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ver.setStyleSheet("color: #999; font-size: 11px;")
         sidebar_layout.addWidget(ver)
@@ -157,6 +157,6 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         QMessageBox.about(self, "关于",
-                          "数据集标注工具 v1.0\n\n"
+                          "数据集标注工具 v2.0\n\n"
                           "功能: 格式转换 / 视频抽帧 / 自动标注 / 标注编辑 / 数据管理\n\n"
                           "支持格式: YOLO txt / COCO JSON / Pascal VOC XML")
