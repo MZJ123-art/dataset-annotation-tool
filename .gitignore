@@ -4,6 +4,11 @@ dist/
 installer_output/
 build_env/
 *.spec
+# 打包配置需要进仓库（否则别人无法构建）
+!数据集标注工具.spec
+
+# 本地工具配置
+.claude/
 
 # Python
 __pycache__/

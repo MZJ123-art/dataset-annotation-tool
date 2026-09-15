@@ -6,6 +6,34 @@ from typing import List, Optional
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm"}
 
+# 扫描图片时跳过的目录：标签目录、已删除暂存目录等
+SKIP_DIR_NAMES = {"labels", "Annotations", "_deleted", "__MACOSX", ".git"}
+
+
+def norm_path(path: str) -> str:
+    """规范化路径，用于可靠地比较两个目录是否相同/互相包含。"""
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
+def is_same_or_inside(child: str, parent: str) -> bool:
+    """child 是否等于 parent 或位于 parent 之内。"""
+    c, p = norm_path(child), norm_path(parent)
+    return c == p or c.startswith(p + os.sep)
+
+
+def paths_conflict(a: str, b: str) -> bool:
+    """两个目录是否相同、或其中一个包含另一个。"""
+    return is_same_or_inside(a, b) or is_same_or_inside(b, a)
+
+
+def check_dir_conflict(src_dir: str, dst_dir: str, src_label: str = "源目录"):
+    """目录冲突时抛出 ValueError（避免把源数据当输出目录清掉）。"""
+    if paths_conflict(src_dir, dst_dir):
+        raise ValueError(
+            f"输出目录不能与{src_label}相同、也不能互相包含：\n"
+            f"  {src_label}: {src_dir}\n  输出目录: {dst_dir}\n"
+            "请换一个独立的输出目录。")
+
 
 def _search_files_in_dir(directory: Path, extensions: set) -> List[str]:
     """Search for files with given extensions in a single directory (non-recursive)."""
@@ -31,7 +59,8 @@ def _deep_search(directory: Path, extensions: set, max_depth: int = 3) -> List[s
         return []
 
     # Search all immediate subdirectories, collect from ALL that have files
-    subdirs = sorted([d for d in directory.iterdir() if d.is_dir()])
+    subdirs = sorted([d for d in directory.iterdir()
+                      if d.is_dir() and d.name not in SKIP_DIR_NAMES])
     all_files = []
     for subdir in subdirs:
         all_files.extend(_search_files_in_dir(subdir, extensions))

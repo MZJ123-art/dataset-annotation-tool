@@ -1,8 +1,9 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QStackedWidget, QLabel, QFrame,
-                             QSizePolicy, QMenuBar, QMenu, QMessageBox)
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QFont, QAction
+                             QSizePolicy, QMenuBar, QMenu, QMessageBox,
+                             QApplication)
+from PyQt6.QtCore import Qt, QSize, QSettings
+from PyQt6.QtGui import QFont, QAction, QKeySequence, QShortcut
 
 from ui.page_convert import PageConvert
 from ui.page_extract import PageExtract
@@ -38,13 +39,45 @@ class NavButton(QPushButton):
         """)
 
 
+def _app_settings() -> QSettings:
+    return QSettings("DatasetTool", "数据集标注工具")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("数据集标注工具")
-        self.setMinimumSize(1200, 800)
-        self.resize(1400, 900)
+        # 最小值放宽，配合各页面的滚动区域，小屏幕（1366x768）也能完整操作
+        self.setMinimumSize(900, 560)
         self._init_ui()
+        self._restore_geometry()
+        self._init_shortcuts()
+
+    def _init_shortcuts(self):
+        for i in range(5):
+            sc = QShortcut(QKeySequence(f"Ctrl+{i + 1}"), self)
+            sc.activated.connect(lambda idx=i: self._switch_page(idx))
+
+    def _restore_geometry(self):
+        s = _app_settings()
+        geo = s.value("window_geometry")
+        if geo is not None:
+            self.restoreGeometry(geo)
+        else:
+            screen = QApplication.primaryScreen().availableGeometry()
+            self.resize(min(1400, max(900, screen.width() - 80)),
+                        min(900, max(560, screen.height() - 80)))
+            self.move(screen.center().x() - self.width() // 2,
+                      max(screen.top(), screen.center().y() - self.height() // 2))
+        last = s.value("last_page", 0, type=int)
+        if 0 <= last < self.stack.count():
+            self._switch_page(last)
+
+    def closeEvent(self, event):
+        s = _app_settings()
+        s.setValue("window_geometry", self.saveGeometry())
+        s.setValue("last_page", self.stack.currentIndex())
+        super().closeEvent(event)
 
     def _init_ui(self):
         central = QWidget()
@@ -72,11 +105,16 @@ class MainWindow(QMainWindow):
         sidebar_layout.setSpacing(6)
 
         # title
-        title = QLabel("数据集工具")
+        title = QLabel("数据集标注工具")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
-        title.setStyleSheet("color: #333; padding: 8px 0 16px 0;")
+        title.setFont(QFont("Microsoft YaHei", 13, QFont.Weight.Bold))
+        title.setStyleSheet("color: #333; padding: 8px 0 4px 0;")
         sidebar_layout.addWidget(title)
+
+        hint = QLabel("Ctrl+1~5 切换页面")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet("color: #aaa; font-size: 10px; padding-bottom: 12px;")
+        sidebar_layout.addWidget(hint)
 
         # nav buttons
         self.nav_buttons = []
@@ -97,7 +135,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addStretch()
 
         # version label
-        ver = QLabel("v2.0")
+        ver = QLabel("v2.1")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ver.setStyleSheet("color: #999; font-size: 11px;")
         sidebar_layout.addWidget(ver)

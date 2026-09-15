@@ -4,6 +4,11 @@ from typing import List, Dict
 from utils.file_utils import get_image_files, find_label_for_image
 from utils.formats.yolo_format import read_label
 from utils.image_utils import get_image_size
+from utils.data_model import ClassMapping
+
+# YOLO 标签是归一化坐标，换算回像素时必然有亚像素级浮点误差
+# (实测 0.001px)，小于该容差不算越界。
+BOUNDS_TOLERANCE_PX = 1.0
 
 
 def _collect_labels_recursive(directory: Path, result: list, max_depth: int = 3):
@@ -36,6 +41,10 @@ def validate_dataset(
     issues = []
     images = get_image_files(image_dir)
 
+    # 必须把类别表传给 read_label，否则所有类别名都会退化成 "class_0"/"class_1"，
+    # 下面第 72 行的 unknown_class 检查就会对每一行标签误报。
+    class_mapping = ClassMapping.from_names(class_names) if class_names else None
+
     for img_path in images:
         stem = Path(img_path).stem
         label_path = find_label_for_image(img_path, label_dir)
@@ -54,10 +63,11 @@ def validate_dataset(
         if label_path.endswith(".txt"):
             try:
                 w, h = get_image_size(img_path)
-                objects = read_label(label_path, w, h)
+                objects = read_label(label_path, w, h, class_mapping)
                 for obj in objects:
                     x1, y1, x2, y2 = obj.bbox
-                    if x1 < 0 or y1 < 0 or x2 > w or y2 > h:
+                    if (x1 < -BOUNDS_TOLERANCE_PX or y1 < -BOUNDS_TOLERANCE_PX
+                            or x2 > w + BOUNDS_TOLERANCE_PX or y2 > h + BOUNDS_TOLERANCE_PX):
                         issues.append(ValidationIssue(
                             label_path, "out_of_bounds",
                             f"框坐标越界: [{x1:.1f},{y1:.1f},{x2:.1f},{y2:.1f}] 图片尺寸[{w},{h}]",

@@ -2,10 +2,13 @@ import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
                              QTextEdit, QProgressBar, QSpinBox, QDoubleSpinBox,
-                             QMessageBox, QCheckBox)
+                             QMessageBox, QCheckBox, QScrollArea, QFrame)
 from PyQt6.QtCore import QThread, pyqtSignal
-from core.dataset_manager import split_dataset, batch_rename
+from core.dataset_manager import (split_dataset, batch_rename, plan_rename,
+                                  count_previous_splits)
 from core.validator import validate_dataset, ValidationIssue
+from utils.file_utils import check_dir_conflict
+from utils.formats.yolo_format import load_class_mapping
 
 
 class SplitWorker(QThread):
@@ -55,7 +58,16 @@ class PageManage(QWidget):
         self._init_ui()
 
     def _init_ui(self):
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(10, 10, 10, 10)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
         # dataset split
         split_group = QGroupBox("数据集拆分 (train/val/test)")
@@ -173,6 +185,9 @@ class PageManage(QWidget):
         self.spin_start = QSpinBox()
         self.spin_start.setRange(0, 999999)
         prefix_row.addWidget(self.spin_start)
+        self.btn_preview_rename = QPushButton("预览")
+        self.btn_preview_rename.clicked.connect(self._preview_rename)
+        prefix_row.addWidget(self.btn_preview_rename)
         self.btn_rename = QPushButton("开始重命名")
         self.btn_rename.clicked.connect(self._start_rename)
         prefix_row.addWidget(self.btn_rename)
@@ -210,6 +225,24 @@ class PageManage(QWidget):
             QMessageBox.warning(self, "提示", f"比例之和应为1.0，当前为{total:.2f}")
             return
 
+        # 输出目录与输入冲突检查 + 上次拆分的残留提示
+        try:
+            check_dir_conflict(img_dir, out_dir, "图片目录")
+            check_dir_conflict(lbl_dir, out_dir, "标签目录")
+        except ValueError as e:
+            QMessageBox.warning(self, "提示", str(e))
+            return
+
+        stale = count_previous_splits(out_dir)
+        if stale:
+            reply = QMessageBox.question(
+                self, "输出目录已有拆分结果",
+                f"输出目录里还有上次拆分留下的 {stale} 个文件：\n{out_dir}\n\n"
+                "继续会先清理它们（只清理 train/val/test 下的 images、labels），是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         self.btn_split.setEnabled(False)
         self.progress.setVisible(True)
         self.log.clear()
@@ -232,11 +265,15 @@ class PageManage(QWidget):
             QMessageBox.warning(self, "提示", "请填写图片和标签目录")
             return
 
+        # 传入类别表，才能检查出“未知类别”（否则这项检查只能被跳过）
+        mapping = load_class_mapping(lbl_dir, img_dir)
+        class_names = mapping.names if mapping else None
+
         self.btn_validate.setEnabled(False)
         self.log.clear()
-        self.log.append("正在校验...")
+        self.log.append("正在校验..." + (f"（类别表: {len(class_names)} 类）" if class_names else "（未找到类别表，跳过未知类别检查）"))
 
-        self._val_worker = ValidateWorker(img_dir, lbl_dir)
+        self._val_worker = ValidateWorker(img_dir, lbl_dir, class_names)
         self._val_worker.finished.connect(self._on_validate_done)
         self._val_worker.error.connect(self._on_error)
         self._val_worker.start()
@@ -273,6 +310,28 @@ class PageManage(QWidget):
         self.btn_rename.setEnabled(False)
         self.log.clear()
         try:
+            plan, conflicts = plan_rename(d, label_dir or None, prefix, start)
+            self.log.append(f"将重命名 {len(plan)} 个文件（前缀 {prefix}_，起始 {start}）")
+            if conflicts:
+                self.log.append(f"⚠ 发现 {len(conflicts)} 个命名冲突，已阻止执行：")
+                for c in conflicts[:20]:
+                    self.log.append(f"    {c}")
+                self.log.append("请修改前缀或起始编号后重试。")
+                self.btn_rename.setEnabled(True)
+                return
+            self.log.append("未发现冲突。")
+
+            reply = QMessageBox.question(
+                self, "确认重命名",
+                f"将重命名 {len(plan)} 个文件（图片和标签会一起改）。\n"
+                f"示例: {plan[0]['old_img'].split(os.sep)[-1]} → {plan[0]['new_img'].split(os.sep)[-1]}\n\n"
+                "重命名不可自动撤销，是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                self.log.append("已取消。")
+                self.btn_rename.setEnabled(True)
+                return
+
             result = batch_rename(d, label_dir=label_dir or None, prefix=prefix, start_index=start)
             self.log.append(f"重命名完成，共 {len(result)} 个文件")
             if label_dir:
@@ -284,6 +343,40 @@ class PageManage(QWidget):
         except Exception as e:
             self.log.append(f"错误: {e}")
         self.btn_rename.setEnabled(True)
+
+    def _preview_rename(self):
+        """只预览重命名结果和冲突，不改动任何文件。"""
+        d = self.rename_dir.text().strip()
+        if not d:
+            QMessageBox.warning(self, "提示", "请选择图片目录")
+            return
+        label_dir = self.rename_label_dir.text().strip()
+        if not label_dir:
+            parent = os.path.dirname(d)
+            for candidate in (os.path.join(parent, "labels"), os.path.join(d, "labels")):
+                if os.path.isdir(candidate):
+                    label_dir = candidate
+                    break
+        prefix = self.edit_prefix.text().strip() or "img"
+        try:
+            plan, conflicts = plan_rename(d, label_dir or None, prefix, self.spin_start.value())
+        except Exception as e:  # noqa: BLE001
+            self.log.clear()
+            self.log.append(f"预览失败: {e}")
+            return
+
+        self.log.clear()
+        self.log.append(f"预览：{len(plan)} 个文件将被重命名（前缀 {prefix}_，起始 {self.spin_start.value()}）")
+        for item in plan[:20]:
+            self.log.append(f"  {os.path.basename(item['old_img'])} → {os.path.basename(item['new_img'])}")
+        if len(plan) > 20:
+            self.log.append(f"  ... 还有 {len(plan)-20} 个")
+        if conflicts:
+            self.log.append(f"⚠ 发现 {len(conflicts)} 个命名冲突（执行会被阻止）：")
+            for c in conflicts[:20]:
+                self.log.append(f"    {c}")
+        else:
+            self.log.append("未发现命名冲突。")
 
     def _on_progress(self, current, total, msg):
         if total > 0:

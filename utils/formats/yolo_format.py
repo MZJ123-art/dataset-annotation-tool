@@ -41,6 +41,32 @@ def read_classes_file(classes_path: str) -> ClassMapping:
     return mapping
 
 
+def find_classes_file(*dirs: str) -> Optional[str]:
+    """在给定目录（及其上一级）里找 classes.txt / classes.names。
+
+    找不到类别表时 read_label 会把类别名退化成 class_0/class_1，
+    统计、校验这类功能必须先拿到它才能显示真实类别名。
+    """
+    seen = set()
+    for d in dirs:
+        if not d:
+            continue
+        for base in (d, os.path.dirname(os.path.abspath(d))):
+            if not base or not os.path.isdir(base) or base in seen:
+                continue
+            seen.add(base)
+            for name in ("classes.txt", "classes.names"):
+                p = os.path.join(base, name)
+                if os.path.isfile(p):
+                    return p
+    return None
+
+
+def load_class_mapping(*dirs: str) -> Optional[ClassMapping]:
+    path = find_classes_file(*dirs)
+    return read_classes_file(path) if path else None
+
+
 def read_label(label_path: str, image_width: int, image_height: int,
                class_mapping: Optional[ClassMapping] = None) -> List[AnnotationObject]:
     objects = []

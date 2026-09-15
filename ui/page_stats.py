@@ -1,10 +1,11 @@
 import os
 from collections import Counter
+from pathlib import Path
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                              QPushButton, QLineEdit, QLabel, QFileDialog,
-                             QTextEdit, QMessageBox)
+                             QTextEdit, QMessageBox, QScrollArea, QFrame)
 from utils.file_utils import get_image_files, find_label_for_image
-from utils.formats.yolo_format import read_label
+from utils.formats.yolo_format import read_label, find_classes_file, load_class_mapping
 from utils.image_utils import get_image_size
 
 
@@ -14,7 +15,16 @@ class PageStats(QWidget):
         self._init_ui()
 
     def _init_ui(self):
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(10, 10, 10, 10)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
         # input
         input_group = QGroupBox("数据集统计")
@@ -76,6 +86,26 @@ class PageStats(QWidget):
             QMessageBox.warning(self, "提示", "未找到图片文件")
             return
 
+        # 必须先拿到类别表，否则 read_label 会把类别名退化成 class_0/class_1
+        classes_path = find_classes_file(lbl_dir, img_dir)
+        class_mapping = load_class_mapping(lbl_dir, img_dir)
+
+        # 判断标签格式：支持 YOLO(.txt) / VOC(.xml) / COCO(.json)
+        from core.converter import detect_format, read_dataset_by_format, FormatType
+        fmt = detect_format(lbl_dir) or detect_format(img_dir) or FormatType.YOLO
+        objects_by_stem = {}
+        fmt_note = ""
+        if fmt in (FormatType.VOC, FormatType.COCO):
+            try:
+                anns, mapping = read_dataset_by_format(lbl_dir, fmt,
+                                                       image_dir=img_dir, label_dir=lbl_dir)
+                for a in anns:
+                    objects_by_stem[Path(a.image_path).stem] = a.objects
+                if mapping and not class_mapping:
+                    class_mapping = mapping
+            except Exception as e:  # noqa: BLE001
+                fmt_note = f"读取 {fmt} 标签失败: {e}"
+
         class_counter = Counter()
         width_list = []
         height_list = []
@@ -89,19 +119,21 @@ class PageStats(QWidget):
             width_list.append(w)
             height_list.append(h)
 
-            label_path = find_label_for_image(img_path, lbl_dir)
-            if label_path and label_path.endswith(".txt"):
-                objects = read_label(label_path, w, h)
-                if objects:
-                    labeled_count += 1
-                    for obj in objects:
-                        class_counter[obj.class_name] += 1
+            if fmt in (FormatType.VOC, FormatType.COCO):
+                objects = objects_by_stem.get(Path(img_path).stem, [])
+            else:
+                label_path = find_label_for_image(img_path, lbl_dir)
+                objects = (read_label(label_path, w, h, class_mapping)
+                           if label_path and label_path.endswith(".txt") else [])
+
+            if objects:
+                labeled_count += 1
+                for obj in objects:
+                    class_counter[obj.class_name] += 1
+                    if len(obj.bbox) == 4:
                         x1, y1, x2, y2 = obj.bbox
-                        area = (x2 - x1) * (y2 - y1)
-                        area_list.append(area)
-                    total_objects += len(objects)
-                else:
-                    unlabeled_count += 1
+                        area_list.append((x2 - x1) * (y2 - y1))
+                total_objects += len(objects)
             else:
                 unlabeled_count += 1
 
@@ -111,6 +143,8 @@ class PageStats(QWidget):
         lines.append(f"已标注图片: {labeled_count}")
         lines.append(f"未标注图片: {unlabeled_count}")
         lines.append(f"总标注框数: {total_objects}")
+        lines.append(f"标签格式: {fmt}" + (f"    ({fmt_note})" if fmt_note else ""))
+        lines.append(f"类别表: {classes_path if classes_path else '未找到 classes.txt / classes.names（类别名会退化为 class_0、class_1…）'}")
         lines.append("")
 
         if width_list:

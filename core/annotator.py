@@ -15,6 +15,15 @@ class AutoAnnotator:
     def load_model(self, model_path: Optional[str] = None):
         if model_path:
             self.model_path = model_path
+        if not self.model_path:
+            raise ValueError("未指定模型文件，请先设置模型路径（.pt / .onnx）")
+
+        # 看起来是路径的做存在性校验并给出明确报错；
+        # 裸文件名（例如 yolov8n.pt）仍交给 ultralytics 自行解析/下载。
+        looks_like_path = os.sep in self.model_path or "/" in self.model_path
+        if looks_like_path and not os.path.isfile(self.model_path):
+            raise FileNotFoundError(f"模型文件不存在: {self.model_path}")
+
         from ultralytics import YOLO
         self.model = YOLO(self.model_path)
         self._loaded = True

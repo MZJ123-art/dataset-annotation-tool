@@ -2,9 +2,11 @@ import os
 from pathlib import Path
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                              QComboBox, QPushButton, QLineEdit, QLabel,
-                             QFileDialog, QTextEdit, QProgressBar, QMessageBox)
+                             QFileDialog, QTextEdit, QProgressBar, QMessageBox,
+                             QCheckBox, QScrollArea, QFrame)
 from PyQt6.QtCore import QThread, pyqtSignal
-from core.converter import FormatType, detect_format, convert_dataset
+from core.converter import (FormatType, detect_format, convert_dataset,
+                            check_dir_conflict, list_previous_output)
 from utils.file_utils import get_image_files
 
 
@@ -13,7 +15,8 @@ class ConvertWorker(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, src_dir, dst_dir, src_fmt, dst_fmt, image_dir=None, label_dir=None):
+    def __init__(self, src_dir, dst_dir, src_fmt, dst_fmt, image_dir=None, label_dir=None,
+                 copy_images=False):
         super().__init__()
         self.src_dir = src_dir
         self.dst_dir = dst_dir
@@ -21,11 +24,13 @@ class ConvertWorker(QThread):
         self.dst_fmt = dst_fmt
         self.image_dir = image_dir
         self.label_dir = label_dir
+        self.copy_images = copy_images
 
     def run(self):
         try:
             convert_dataset(self.src_dir, self.dst_dir, self.src_fmt, self.dst_fmt,
                             image_dir=self.image_dir, label_dir=self.label_dir,
+                            copy_images=self.copy_images,
                             progress_callback=self.progress.emit)
             self.finished.emit(self.dst_dir)
         except Exception as e:
@@ -39,7 +44,16 @@ class PageConvert(QWidget):
         self._init_ui()
 
     def _init_ui(self):
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(10, 10, 10, 10)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
         # label dir (main input)
         lbl_group = QGroupBox("标签目录")
@@ -93,6 +107,11 @@ class PageConvert(QWidget):
         dst_layout.addWidget(btn_dst)
         layout.addWidget(dst_group)
 
+        # 是否把图片一起复制过去
+        self.chk_copy_images = QCheckBox("同时复制图片到输出目录（COCO 格式必须，否则 json 指向的图片不存在）")
+        self.chk_copy_images.setChecked(True)
+        layout.addWidget(self.chk_copy_images)
+
         # convert button
         self.btn_convert = QPushButton("开始转换")
         self.btn_convert.setMinimumHeight(40)
@@ -114,6 +133,8 @@ class PageConvert(QWidget):
 
         # connections
         self.lbl_dir.textChanged.connect(self._auto_detect)
+        # 图片目录变化也要刷新“图片: N 张”那一行（YOLO 转出时要用）
+        self.img_dir.textChanged.connect(self._auto_detect)
         self._on_format_changed(self.src_format.currentText())
 
     def _browse_dir(self, line_edit):
@@ -151,6 +172,7 @@ class PageConvert(QWidget):
         xml_files += [f for sub in p.iterdir() if sub.is_dir() for f in sub.glob("*.xml")]
         xml_count = len(xml_files)
         json_count = len(list(p.glob("*.json")))
+        json_count += sum(1 for sub in p.iterdir() if sub.is_dir() for _ in sub.glob("*.json"))
         count = max(txt_count, xml_count, json_count)
 
         info = f"标签文件: {count} 个"
@@ -165,14 +187,41 @@ class PageConvert(QWidget):
         if not lbl_dir or not dst:
             QMessageBox.warning(self, "提示", "请选择标签目录和输出目录")
             return
-        if lbl_dir == dst:
-            QMessageBox.warning(self, "提示", "标签目录和输出目录不能相同")
-            return
 
         src_fmt = self.src_format.currentText()
         img_dir = self.img_dir.text().strip() or None
         # for YOLO source, use label dir as src_dir (for finding classes.txt etc.)
         src_dir = lbl_dir
+
+        # 源/输出目录冲突检查（含“互相包含”，避免把源数据当输出目录清掉）
+        try:
+            check_dir_conflict(src_dir, dst)
+        except ValueError as e:
+            QMessageBox.warning(self, "提示", str(e))
+            return
+
+        # 输出目录非空时先确认，并明确列出将被清理的旧产物
+        if os.path.isdir(dst) and any(os.scandir(dst)):
+            stale = list_previous_output(dst)
+            if stale:
+                sample = "\n".join("  " + os.path.relpath(p, dst) for p in stale[:8])
+                more = f"\n  ... 另有 {len(stale) - 8} 个" if len(stale) > 8 else ""
+                reply = QMessageBox.question(
+                    self, "输出目录非空",
+                    f"输出目录已存在且不为空:\n{dst}\n\n"
+                    f"将先清理本工具上次生成的 {len(stale)} 个旧产物：\n{sample}{more}\n\n"
+                    "目录中的其它文件会保留。是否继续？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+            else:
+                reply = QMessageBox.question(
+                    self, "输出目录非空",
+                    f"输出目录已存在且不为空:\n{dst}\n\n"
+                    "其中没有本工具的旧产物，已有文件会被保留。是否继续？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
 
         self.btn_convert.setEnabled(False)
         self.progress.setVisible(True)
@@ -181,7 +230,8 @@ class PageConvert(QWidget):
 
         self._worker = ConvertWorker(
             src_dir, dst, src_fmt, self.dst_format.currentText(),
-            image_dir=img_dir, label_dir=lbl_dir)
+            image_dir=img_dir, label_dir=lbl_dir,
+            copy_images=self.chk_copy_images.isChecked())
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_done)
         self._worker.error.connect(self._on_error)

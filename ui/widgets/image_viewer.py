@@ -11,6 +11,7 @@ class DrawState:
     DRAWING = "drawing"
     MOVING = "moving"
     RESIZING = "resizing"
+    PANNING = "panning"
 
 
 class BoundingBox:
@@ -53,18 +54,24 @@ class ImageViewer(QWidget):
     box_deleted = pyqtSignal()
     box_moved = pyqtSignal(int, float, float, float, float)
     image_dropped = pyqtSignal(str)
+    zoom_changed = pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAcceptDrops(True)
+        self.setToolTip("滚轮缩放（1x~8x）｜右键拖拽平移｜F 适应窗口｜Ctrl+Z 撤销")
 
         self._pixmap: Optional[QPixmap] = None
         self._boxes: List[BoundingBox] = []
         self._selected_indices: Set[int] = set()
         self._scale: float = 1.0
+        self._fit_scale: float = 1.0
+        self._zoom: float = 1.0
         self._offset: Tuple[float, float] = (0, 0)
+        self._pan_start: Optional[QPointF] = None
+        self._pan_off_start: Tuple[float, float] = (0, 0)
 
         self._state = DrawState.IDLE
         self._draw_start: Optional[QPointF] = None
@@ -93,6 +100,7 @@ class ImageViewer(QWidget):
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
         self._pixmap = QPixmap.fromImage(qimg)
+        self._zoom = 1.0            # 换图后回到“适应窗口”
         self._fit_view()
         self.update()
 
@@ -157,14 +165,65 @@ class ImageViewer(QWidget):
             return
         pw, ph = self._pixmap.width(), self._pixmap.height()
         ww, wh = self.width(), self.height()
-        self._scale = min(ww / max(pw, 1), wh / max(ph, 1))
+        self._fit_scale = min(ww / max(pw, 1), wh / max(ph, 1))
+        self._scale = self._fit_scale * self._zoom
         self._offset = ((ww - pw * self._scale) / 2, (wh - ph * self._scale) / 2)
+        self._clamp_offset()
+        self.update()
+
+    def reset_zoom(self):
+        """恢复“适应窗口”。"""
+        self._zoom = 1.0
+        self._fit_view()
+        self.zoom_changed.emit(self._zoom)
+
+    def _clamp_offset(self):
+        """限制平移范围：图片小于窗口时居中，大于窗口时不留空隙。"""
+        if not self._pixmap:
+            return
+        iw = self._pixmap.width() * self._scale
+        ih = self._pixmap.height() * self._scale
+        ww, wh = self.width(), self.height()
+        ox, oy = self._offset
+        ox = (ww - iw) / 2 if iw <= ww else min(0.0, max(ox, ww - iw))
+        oy = (wh - ih) / 2 if ih <= wh else min(0.0, max(oy, wh - ih))
+        self._offset = (ox, oy)
+
+    def wheelEvent(self, event):
+        """滚轮以光标为中心缩放（1x ~ 8x）。"""
+        if not self._pixmap:
+            return
+        delta = event.angleDelta().y()
+        if not delta:
+            return
+        pos = event.position()
+        img_pt = self._widget_to_img(pos.x(), pos.y())
+        factor = 1.25 if delta > 0 else 1 / 1.25
+        new_zoom = max(1.0, min(self._zoom * factor, 8.0))
+        if abs(new_zoom - self._zoom) < 1e-9:
+            return
+        self._zoom = new_zoom
+        self._scale = self._fit_scale * self._zoom
+        # 保持光标下的图像点不动
+        self._offset = (pos.x() - img_pt.x() * self._scale,
+                        pos.y() - img_pt.y() * self._scale)
+        self._clamp_offset()
+        self.zoom_changed.emit(self._zoom)
+        self.update()
+        event.accept()
 
     def _img_to_widget(self, x: float, y: float) -> QPointF:
         return QPointF(x * self._scale + self._offset[0], y * self._scale + self._offset[1])
 
     def _widget_to_img(self, x: float, y: float) -> QPointF:
         return QPointF((x - self._offset[0]) / self._scale, (y - self._offset[1]) / self._scale)
+
+    def _clamp_to_image(self, x: float, y: float) -> QPointF:
+        """把图片坐标夹到图片范围内，避免画出/拖出越界的框。"""
+        if not self._pixmap:
+            return QPointF(x, y)
+        return QPointF(min(max(x, 0.0), float(self._pixmap.width())),
+                       min(max(y, 0.0), float(self._pixmap.height())))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -224,6 +283,14 @@ class ImageViewer(QWidget):
             return
         pos = event.position()
 
+        # 右键拖拽平移图片
+        if event.button() == Qt.MouseButton.RightButton:
+            self._state = DrawState.PANNING
+            self._pan_start = pos
+            self._pan_off_start = self._offset
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
             if self._drawing_mode:
                 self._state = DrawState.DRAWING
@@ -261,26 +328,44 @@ class ImageViewer(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position()
+        if self._state == DrawState.PANNING and self._pan_start:
+            dx = pos.x() - self._pan_start.x()
+            dy = pos.y() - self._pan_start.y()
+            self._offset = (self._pan_off_start[0] + dx, self._pan_off_start[1] + dy)
+            self._clamp_offset()
+            self.update()
+            return
         if self._state == DrawState.DRAWING:
             self._draw_end = pos
             self.update()
         elif self._state == DrawState.MOVING and self._drag_start:
             dx = (pos.x() - self._drag_start.x()) / self._scale
             dy = (pos.y() - self._drag_start.y()) / self._scale
+            iw, ih = (self._pixmap.width(), self._pixmap.height()) if self._pixmap else (0, 0)
             for i in self._drag_indices:
                 if i in self._drag_origs:
                     orig = self._drag_origs[i]
-                    self._boxes[i].x1 = orig[0] + dx
-                    self._boxes[i].y1 = orig[1] + dy
-                    self._boxes[i].x2 = orig[2] + dx
-                    self._boxes[i].y2 = orig[3] + dy
+                    # 夹住位移量，保证整个框始终留在图片内
+                    dx_i = max(-orig[0], min(dx, iw - orig[2])) if iw else dx
+                    dy_i = max(-orig[1], min(dy, ih - orig[3])) if ih else dy
+                    self._boxes[i].x1 = orig[0] + dx_i
+                    self._boxes[i].y1 = orig[1] + dy_i
+                    self._boxes[i].x2 = orig[2] + dx_i
+                    self._boxes[i].y2 = orig[3] + dy_i
             self.update()
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton and self._state == DrawState.PANNING:
+            self._state = DrawState.IDLE
+            self._pan_start = None
+            self.setCursor(Qt.CursorShape.CrossCursor if self._drawing_mode else Qt.CursorShape.ArrowCursor)
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self._state == DrawState.DRAWING and self._draw_start:
-                p1 = self._widget_to_img(self._draw_start.x(), self._draw_start.y())
-                p2 = self._widget_to_img(self._draw_end.x(), self._draw_end.y())
+                p1w = self._widget_to_img(self._draw_start.x(), self._draw_start.y())
+                p2w = self._widget_to_img(self._draw_end.x(), self._draw_end.y())
+                p1 = self._clamp_to_image(p1w.x(), p1w.y())
+                p2 = self._clamp_to_image(p2w.x(), p2w.y())
                 x1, y1 = min(p1.x(), p2.x()), min(p1.y(), p2.y())
                 x2, y2 = max(p1.x(), p2.x()), max(p1.y(), p2.y())
                 if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:

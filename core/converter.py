@@ -1,9 +1,18 @@
 import os
+import shutil
 from pathlib import Path
 from typing import List, Callable, Optional
 from utils.data_model import Annotation, ClassMapping
 from utils.formats import yolo_format, coco_format, voc_format
-from utils.file_utils import safe_makedirs, get_image_files, find_label_for_image
+from utils.file_utils import (safe_makedirs, get_image_files, find_label_for_image,
+                              check_dir_conflict as _check, paths_conflict)
+
+# 各目标格式放图片的子目录（COCO 的 json 里写的是文件名，图片必须与 json 同级）
+IMAGE_SUBDIR = {
+    "YOLO": "images",
+    "VOC": "JPEGImages",
+    "COCO": "",
+}
 
 
 class FormatType:
@@ -12,6 +21,46 @@ class FormatType:
     VOC = "VOC"
 
     ALL = [YOLO, COCO, VOC]
+
+
+# 本工具可能写出的所有产物（清理时只动这些，绝不动输出目录里的其它内容）
+_ARTIFACT_KINDS = [
+    ("labels", ".txt"),          # YOLO
+    ("", "classes.txt"),         # YOLO
+    ("Annotations", ".xml"),     # VOC
+    ("", "annotations.coco.json"),  # COCO
+]
+
+
+def check_dir_conflict(src_dir: str, dst_dir: str):
+    """源目录与输出目录不得相同或互相包含（见 utils.file_utils）。"""
+    _check(src_dir, dst_dir, "源目录")
+
+
+def list_previous_output(dst_dir: str) -> list:
+    """列出输出目录中本工具上次转换留下的产物（供界面提示 / 清理）。"""
+    found = []
+    for sub, suffix in _ARTIFACT_KINDS:
+        target = os.path.join(dst_dir, sub) if sub else dst_dir
+        if os.path.isdir(target):
+            found.extend(str(f) for f in Path(target).glob(f"*{suffix}") if f.is_file())
+    return found
+
+
+def clean_previous_output(dst_dir: str) -> int:
+    """只删除本工具生成的旧产物，保留目录中的其它文件。
+
+    旧实现是 shutil.rmtree(整个输出目录)，一旦输出目录选错（例如选了数据集
+    本身或它的父目录）会把用户的图片和标签一起删掉，这里改为精确清理。
+    """
+    removed = 0
+    for f in list_previous_output(dst_dir):
+        try:
+            os.remove(f)
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def _check_yolo_in_dir(sd: Path) -> bool:
@@ -102,6 +151,7 @@ def convert_dataset(
     src_format: str, dst_format: str,
     image_dir: str = None, label_dir: str = None,
     class_mapping: Optional[ClassMapping] = None,
+    copy_images: bool = False,
     progress_callback: Optional[Callable[[int, int, str], None]] = None
 ) -> str:
     annotations, detected_mapping = read_dataset_by_format(
@@ -111,13 +161,15 @@ def convert_dataset(
     if class_mapping is None:
         class_mapping = detected_mapping
 
-    # clean output directory to avoid leftover files from previous conversions
-    import shutil
-    if os.path.exists(dst_dir):
-        shutil.rmtree(dst_dir)
+    # 安全阀：禁止写到源目录内部 / 覆盖源目录（旧版本会 rmtree 输出目录，可能毁掉源数据）
+    check_dir_conflict(label_dir or src_dir, dst_dir)
+
+    # 只清理上次转换留下的产物，保留用户放在输出目录里的其它文件
     safe_makedirs(dst_dir)
+    clean_previous_output(dst_dir)
 
     total = len(annotations)
+    copied = missing = 0
     for i, ann in enumerate(annotations):
         if progress_callback:
             progress_callback(i, total, os.path.basename(ann.image_path))
@@ -134,6 +186,18 @@ def convert_dataset(
             label_path = os.path.join(label_out, f"{stem}.xml")
             voc_format.write_annotation(label_path, ann, class_mapping)
 
+        # 可选：把图片一并复制过去，否则目标数据集没有图片（COCO 的 json 会指向不存在的文件）
+        if copy_images:
+            src_img = ann.image_path
+            if os.path.isfile(src_img):
+                img_out = os.path.join(dst_dir, IMAGE_SUBDIR.get(dst_format, "images"))
+                if img_out:
+                    safe_makedirs(img_out)
+                shutil.copy2(src_img, os.path.join(img_out, os.path.basename(src_img)))
+                copied += 1
+            else:
+                missing += 1
+
     # write format-specific metadata
     if dst_format == FormatType.YOLO:
         classes_path = os.path.join(dst_dir, "classes.txt")
@@ -145,6 +209,11 @@ def convert_dataset(
         coco_format.write_annotation(json_path, annotations, class_mapping)
 
     if progress_callback:
-        progress_callback(total, total, "完成")
+        if copy_images:
+            msg = f"完成（复制图片 {copied} 张"
+            msg += f"，{missing} 张源图片缺失已跳过）" if missing else "）"
+            progress_callback(total, total, msg)
+        else:
+            progress_callback(total, total, "完成")
 
     return dst_dir

@@ -3,10 +3,19 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                              QComboBox, QPushButton, QLineEdit, QLabel,
                              QFileDialog, QTextEdit, QProgressBar, QSpinBox,
                              QDoubleSpinBox, QCheckBox, QMessageBox, QRadioButton,
-                             QButtonGroup, QListWidget, QAbstractItemView)
-from PyQt6.QtCore import QThread, pyqtSignal
+                             QButtonGroup, QListWidget, QAbstractItemView,
+                             QScrollArea, QFrame)
+from PyQt6.QtCore import QThread, pyqtSignal, QSettings
 from core.extractor import extract_frames, get_video_info, ExtractMode
 from core.annotator import AutoAnnotator
+
+SETTINGS_ORG = "DatasetTool"
+SETTINGS_APP = "数据集标注工具"
+
+
+def _settings() -> QSettings:
+    """记住用户上次选择（注册表 / INI），避免每次重新选模型。"""
+    return QSettings(SETTINGS_ORG, SETTINGS_APP)
 
 
 class DownwardComboBox(QComboBox):
@@ -54,7 +63,16 @@ class PageExtract(QWidget):
         self._init_ui()
 
     def _init_ui(self):
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(10, 10, 10, 10)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
         # video selection
         vid_group = QGroupBox("视频文件")
@@ -134,8 +152,40 @@ class PageExtract(QWidget):
         layout.addWidget(out_group)
 
         # auto annotate
-        self.chk_annotate = QCheckBox("抽帧后自动标注 (使用YOLOv8)")
+        self.chk_annotate = QCheckBox("抽帧后自动标注 (使用YOLO模型)")
+        self.chk_annotate.toggled.connect(self._on_annotate_toggled)
         layout.addWidget(self.chk_annotate)
+
+        # 模型设置：模型文件路径 + 置信度阈值
+        self.model_group = QGroupBox("模型设置（留空则使用 yolov8n.pt 通用模型）")
+        model_layout = QVBoxLayout(self.model_group)
+
+        m_row = QHBoxLayout()
+        m_row.addWidget(QLabel("模型文件:"))
+        self.model_path = QLineEdit()
+        self.model_path.setPlaceholderText("选择 .pt / .onnx 模型文件，例如 best.pt")
+        btn_model = QPushButton("浏览")
+        btn_model.clicked.connect(self._browse_model)
+        m_row.addWidget(self.model_path)
+        m_row.addWidget(btn_model)
+        model_layout.addLayout(m_row)
+
+        c_row = QHBoxLayout()
+        c_row.addWidget(QLabel("置信度阈值:"))
+        self.spin_conf = QDoubleSpinBox()
+        self.spin_conf.setRange(0.01, 1.0)
+        self.spin_conf.setSingleStep(0.05)
+        self.spin_conf.setDecimals(2)
+        self.spin_conf.setValue(0.25)
+        c_row.addWidget(self.spin_conf)
+        c_row.addSpacing(20)
+        self.lbl_model_info = QLabel("")
+        c_row.addWidget(self.lbl_model_info)
+        c_row.addStretch()
+        model_layout.addLayout(c_row)
+
+        self.model_group.setEnabled(False)
+        layout.addWidget(self.model_group)
 
         # start button
         self.btn_start = QPushButton("开始抽帧")
@@ -154,6 +204,8 @@ class PageExtract(QWidget):
         layout.addWidget(self.log)
 
         layout.addStretch()
+
+        self._restore_model_settings()
 
     def _add_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -268,15 +320,72 @@ class PageExtract(QWidget):
         if self.chk_annotate.isChecked() and files:
             self._auto_annotate(files)
 
-    def _auto_annotate(self, files):
-        self.log.append("开始自动标注...")
+    def _on_annotate_toggled(self, checked):
+        self.model_group.setEnabled(checked)
+
+    def _browse_model(self):
+        current = self.model_path.text().strip()
+        start_dir = os.path.dirname(current) if current else ""
+        if not os.path.isdir(start_dir):
+            start_dir = ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择模型文件", start_dir,
+            "模型文件 (*.pt *.onnx *.engine);;所有文件 (*)")
+        if path:
+            self.model_path.setText(os.path.normpath(path))
+            self._remember_model_settings()
+            self.lbl_model_info.setText("")
+
+    def _remember_model_settings(self):
+        s = _settings()
+        s.setValue("model_path", self.model_path.text().strip())
+        s.setValue("conf_threshold", float(self.spin_conf.value()))
+        s.setValue("auto_annotate", bool(self.chk_annotate.isChecked()))
+
+    def _restore_model_settings(self):
+        s = _settings()
+        saved = s.value("model_path", "", type=str)
+        if saved and os.path.isfile(saved):
+            self.model_path.setText(saved)
+        elif saved:
+            # 上次的模型被移动/删除了：留在输入框里但给出提示
+            self.model_path.setText(saved)
+            self.lbl_model_info.setText("⚠ 上次的模型文件已不存在")
         try:
-            annotator = AutoAnnotator()
-            annotator.load_model("yolov8n.pt")
+            self.spin_conf.setValue(float(s.value("conf_threshold", 0.25)))
+        except (TypeError, ValueError):
+            pass
+        auto = s.value("auto_annotate", False, type=bool)
+        self.chk_annotate.setChecked(bool(auto))
+        self.model_group.setEnabled(bool(auto))
+
+    def _auto_annotate(self, files):
+        model_path = self.model_path.text().strip()
+        if not model_path:
+            model_path = "yolov8n.pt"
+            self.log.append("提示: 未指定模型文件，使用 yolov8n.pt（COCO 通用模型，类别可能与你的数据不符）")
+        elif not os.path.isfile(model_path):
+            self.log.append(f"自动标注已跳过: 找不到模型文件 -> {model_path}")
+            QMessageBox.warning(
+                self, "模型文件不存在",
+                f"找不到模型文件:\n{model_path}\n\n请在「模型设置」里重新选择。")
+            return
+
+        self._remember_model_settings()
+        conf = float(self.spin_conf.value())
+        self.log.append(f"开始自动标注（模型: {os.path.basename(model_path)}, 置信度: {conf:.2f}）...")
+        try:
+            annotator = AutoAnnotator(model_path)
+            annotator.load_model()
+            names = annotator.get_class_names()
+            self.log.append(f"模型类别({len(names)}): {', '.join(names)}")
             output_dir = self.out_path.text().strip()
             label_dir = os.path.join(output_dir, "labels")
-            annotator.annotate_directory(output_dir, label_dir, output_format="yolo")
-            self.log.append("自动标注完成！")
+            annotator.annotate_directory(
+                output_dir, label_dir,
+                conf_threshold=conf,
+                output_format="yolo")
+            self.log.append(f"自动标注完成！标签已写入 {label_dir}")
         except Exception as e:
             self.log.append(f"自动标注失败: {e}")
 
