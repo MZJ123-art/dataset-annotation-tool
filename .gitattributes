@@ -1,15 +1,18 @@
-# 统一换行符：批处理必须是 CRLF，脚本/文档用 LF
-* text=auto
+# 统一换行符策略
+# 批处理必须是 CRLF：cmd.exe 对 LF 换行的 .bat 支持很差
+# 这里用 -text（不做任何转换），保证「git clone」和「网页下载原始文件」
+# 拿到的都是仓库里存的 CRLF 字节
+*.bat -text
+*.cmd -text
 
-*.bat text eol=crlf
-*.cmd text eol=crlf
-
-*.py  text eol=lf
-*.md  text eol=lf
-*.txt text eol=lf
+# 其余文本文件统一 LF
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
 *.spec text eol=lf
 *.iss  text eol=crlf
 
+# 二进制
 *.png binary
 *.jpg binary
 *.ico binary
