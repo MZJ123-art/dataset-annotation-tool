@@ -70,7 +70,14 @@ if not defined EXE_PATH (
 for %%f in ("%EXE_PATH%") do set "EXE_BASE=%%~nf"
 
 rem ---------- deploy ----------
-if not defined APP_DIR set "APP_DIR=%USERPROFILE%\Desktop\%EXE_BASE%"
+rem ask the shell where the desktop really is: %USERPROFILE%\Desktop is wrong
+rem when the desktop folder has been redirected (e.g. to D:\desktop)
+if not defined APP_DIR (
+    set "DESKTOP="
+    for /f "usebackq delims=" %%d in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKTOP=%%d"
+    if not defined DESKTOP set "DESKTOP=%USERPROFILE%\Desktop"
+    set "APP_DIR=%DESKTOP%\%EXE_BASE%"
+)
 echo.
 echo [2/4] Deploying to: %APP_DIR%
 if not exist "%APP_DIR%" mkdir "%APP_DIR%" >nul 2>&1
